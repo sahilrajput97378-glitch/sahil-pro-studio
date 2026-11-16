@@ -1,6 +1,5 @@
-streamlit
+flask
 librosa
 soundfile
 numpy
-noisereduce
 pedalboard
