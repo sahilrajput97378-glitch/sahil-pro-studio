@@ -1,132 +1,121 @@
 import os
-import streamlit as st
+from flask import Flask, render_template_string, request, send_file
 import librosa
 import soundfile as sf
 import numpy as np
-import noisereduce as nr
-from pedalboard import Pedalboard, Reverb, Compressor, Gain, Chorus, Delay, HighpassFilter, LowpassFilter, Distortion
+from pedalboard import Pedalboard, Reverb, Compressor, HighpassFilter, Gain
 
-# पेज की सेटिंग
-st.set_page_config(page_title="Sahil Pro Music Studio AI (FL Studio Edition)", page_icon="🎧", layout="centered")
+app = Flask(__name__)
 
-OUTPUT_DIR = "generated_songs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+HTML_TEMPLATE = '''
+<!doctype html>
+<html lang="hi">
+<head>
+    <meta charset="utf-8">
+    <title>Smart AI Vocal Match Studio</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #121212; color: #fff; padding: 20px; display: flex; justify-content: center; }
+        .container { width: 100%; max-width: 500px; background: #1e1e1e; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        h2 { text-align: center; color: #1db954; margin-bottom: 20px; }
+        label { display: block; margin-top: 15px; font-weight: bold; font-size: 14px; }
+        input[type="file"], textarea { width: 100%; margin-top: 5px; padding: 10px; border-radius: 6px; border: 1px solid #444; background: #2a2a2a; color: #fff; box-sizing: border-box; }
+        button { width: 100%; margin-top: 25px; padding: 12px; border-radius: 6px; background: #1db954; color: #fff; font-weight: bold; font-size: 16px; border: none; cursor: pointer; }
+        button:hover { background: #1aa34a; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>🎛️ Smart AI Reference Vocal Studio</h2>
+        <form method="POST" enctype="multipart/form-data">
+            <label>1. ओरिजिनल बीट (Beat):</label>
+            <input type="file" name="beat" accept=".wav,.mp3" required>
 
-st.title("🎧 Sahil Creation & DP Studio Pro - Virtual DAW")
-st.write("FL Studio स्टाइल वोकल चेन, 105+ कंट्रोल्स, EQ, De-Esser और Limiter के साथ अपनी आवाज़ को मास्टर करें!")
+            <label>2. कच्ची आवाज़ (Dry Vocals):</label>
+            <input type="file" name="vocal" accept=".wav,.mp3" required>
 
-# --- साइडबार में FL Studio और 105+ प्रो कंट्रोल्स ---
-st.sidebar.header("🎛️ FL Studio & Pro VST कंट्रोल्स")
+            <label>3. रेफरेंस सॉन्ग (वाइब और इफ़ेक्ट्स मैच करने के लिए):</label>
+            <input type="file" name="reference" accept=".wav,.mp3">
 
-st.sidebar.subheader("1. वोकल स्टाइल और मूड (Suno AI)")
-custom_style = st.sidebar.text_input("गाना स्टाइल / वाइब", value="Sad Hindi hip-hop, emotional melodic rap, deep bass, 808 drums")
-genre = st.sidebar.selectbox("जॉनर चुनें", ["Sad Hip-Hop", "Lo-Fi", "Hard Rap", "Romantic", "Electronic", "Rock", "Pop", "Classical"])
+            <label>4. कस्टम स्टाइल बॉक्स (अपना मूड या वाइब लिखें):</label>
+            <textarea name="style" rows="3" placeholder="जैसे: Sad Haryanvi vibe, deep reverb, clean vocals..."></textarea>
 
-st.sidebar.subheader("2. FL Studio मिक्सर - नॉइज़ & पिच")
-noise_reduce_power = st.sidebar.slider("नॉइज़ रिमूवल पावर (Noise Reduction)", 0.0, 1.0, 0.8, 0.05)
-pitch_steps_val = st.sidebar.slider("ऑटो-पिच ट्यूनिंग (Pitch Shift)", -6.0, 6.0, 0.5, 0.5)
+            <button type="submit">🚀 स्मार्ट रेफरेंस मिक्सिंग शुरू करें</button>
+        </form>
+    </div>
+</body>
+</html>
+'''
 
-st.sidebar.subheader("3. पैरामीट्रिक EQ & फ़िल्टर")
-high_pass_cut = st.sidebar.slider("हाई-पास फ़िल्टर (Low Cut Hz)", 20.0, 200.0, 80.0, 5.0)
-low_pass_cut = st.sidebar.slider("लो-पास फ़िल्टर (High Cut Hz)", 5000.0, 20000.0, 16000.0, 500.0)
-eq_mid_gain = st.sidebar.slider("पैरामेट्रिक EQ मिड गेन (dB)", -12.0, 12.0, 2.0, 0.5)
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        beat_file = request.files['beat']
+        vocal_file = request.files['vocal']
+        ref_file = request.files.get('reference')
+        style_text = request.form.get('style', '').lower()
 
-st.sidebar.subheader("4. वोकल शार्प & डायनेमिक्स (De-Esser)")
-deesser_sens = st.sidebar.slider("डी-एसर सेंसिटिविटी (S-Control)", 0.0, 1.0, 0.5, 0.05)
-comp_thresh = st.sidebar.slider("कंप्रेसर थ्रेशोल्ड (dB)", -40.0, 0.0, -18.0, 1.0)
-comp_ratio = st.sidebar.slider("कंप्रेसर रेशो (Ratio)", 1.0, 10.0, 4.0, 0.5)
-comp_attack = st.sidebar.slider("अटैक टाइम (ms)", 0.1, 50.0, 5.0, 0.5)
-comp_release = st.sidebar.slider("रिलीज़ टाइम (ms)", 10.0, 500.0, 120.0, 5.0)
+        os.makedirs('uploads', exist_ok=True)
+        beat_path = os.path.join('uploads', beat_file.filename)
+        vocal_path = os.path.join('uploads', vocal_file.filename)
+        beat_file.save(beat_path)
+        vocal_file.save(vocal_path)
 
-st.sidebar.subheader("5. समय, स्पेस & रिवर्ब")
-delay_time = st.sidebar.slider("डिले टाइम (Seconds)", 0.0, 1.0, 0.25, 0.05)
-delay_mix = st.sidebar.slider("डिले मिक्स (Mix)", 0.0, 1.0, 0.15, 0.05)
-reverb_room = st.sidebar.slider("रिवर्ब रूम साइज़ (Room Size)", 0.0, 1.0, 0.55, 0.05)
-reverb_damping = st.sidebar.slider("रिवर्ब डैम्पिंग", 0.0, 1.0, 0.45, 0.05)
-reverb_wet = st.sidebar.slider("रिवर्ब वेट लेवल (Wet)", 0.0, 1.0, 0.3, 0.05)
+        # ऑडियो लोड करना
+        vocal_audio, sr = librosa.load(vocal_path, sr=22050)
+        beat_audio, _ = librosa.load(beat_path, sr=22050)
 
-st.sidebar.subheader("6. कोरस, वाइडर & सैचुरेशन")
-chorus_mix = st.sidebar.slider("कोरस मिक्स", 0.0, 1.0, 0.12, 0.02)
-stereo_width = st.sidebar.slider("स्टीरियो वाइडर (Spread)", 0.0, 2.0, 1.2, 0.1)
-distortion_drive = st.sidebar.slider("डिस्टॉर्शन / सैचुरेशन (Drive dB)", 0.0, 20.0, 0.0, 1.0)
+        # डिफॉल्ट इफ़ेक्ट पैरामीटर्स
+        rev_room = 0.3
+        rev_wet = 0.25
+        comp_ratio = 3.0
 
-st.sidebar.subheader("7. मास्टर आउटपुट & लिमिटर")
-limiter_thresh = st.sidebar.slider("ब्रिकवॉल लिमिटर (Peak dB)", -6.0, 0.0, -0.5, 0.1)
-master_gain = st.sidebar.slider("मास्टर वॉल्यूम बूस्ट (Gain dB)", 0.0, 15.0, 3.5, 0.5)
+        # --- स्मार्ट रेफरेंस एनालिसिस लॉजिक ---
+        if ref_file and ref_file.filename != '':
+            ref_path = os.path.join('uploads', ref_file.filename)
+            ref_file.save(ref_path)
+            ref_audio, _ = librosa.load(ref_path, sr=22050)
+            
+            # रेफरेंस गाने की एनर्जी और स्पेक्ट्रल ब्राइटनेस कैलकुलेट करना
+            ref_rms = np.mean(librosa.feature.rms(y=ref_audio))
+            
+            # वाइब के हिसाब से ऑटोमैटिक पैरामीटर सेट करना
+            if ref_rms > 0.1:  # अगर गाना एनर्जेटिक/लाउड है
+                comp_ratio = 4.5
+                rev_wet = 0.20
+            else:  # अगर स्लो/सैड/मेलोडी वाइब है (ज्यादा रिवर्ब चाहिए)
+                rev_room = 0.6
+                rev_wet = 0.45
+                comp_ratio = 2.5
+        
+        # --- कस्टम स्टाइल बॉक्स का असर ---
+        if 'sad' in style_text or 'reverb' in style_text:
+            rev_room = 0.65
+            rev_wet = 0.5
+        if 'clean' in style_text or 'dry' in style_text:
+            rev_wet = 0.15
 
+        # स्मार्ट पैडलबोर्ड जो रेफरेंस और स्टाइल के हिसाब से एडजस्ट होगा
+        board = Pedalboard([
+            HighpassFilter(cutoff_frequency_hz=85.0),
+            Compressor(threshold_db=-20.0, ratio=comp_ratio),
+            Reverb(room_size=rev_room, damping=0.5, wet_level=rev_wet, dry_level=1.0 - rev_wet),
+            Gain(gain_db=2.0)
+        ])
 
-# --- मुख्य ऐप इंटरफ़ेस ---
-uploaded_file = st.file_uploader("अपनी सादी आवाज़ अपलोड करें (MP3, WAV, M4A)", type=["mp3", "wav", "m4a"])
+        # वोकल्स पर ऑटोमैटिक प्रोसेसिंग
+        processed_vocal = board(vocal_audio, sr)
 
-if uploaded_file is not None:
-    st.audio(uploaded_file, format='audio/mp3')
-    
-    if st.button("🚀 FL Studio स्टाइल प्रो मास्टरिंग शुरू करें"):
-        with st.spinner("FL Studio वोकल चेन, EQ, De-Esser और सारे इफ़ेक्ट्स अप्लाई हो रहे हैं..."):
-            try:
-                # ऑडियो फाइल सेव करना
-                audio_bytes = uploaded_file.read()
-                temp_input_path = "temp_input.wav"
-                with open(temp_input_path, "wb") as f:
-                    f.write(audio_bytes)
-                
-                # --- 1. फुल लेंथ ऑडियो लोड (गैप और सांस सुरक्षित) ---
-                y, sr = librosa.load(temp_input_path, sr=44100, duration=None)
-                
-                # --- 2. नॉइज़ रिडक्शन ---
-                y_denoised = nr.reduce_noise(y=y, sr=sr, stationary=True, prop_decrease=noise_reduce_power)
-                
-                # --- 3. ऑटो-पिच ट्यूनिंग ---
-                y_pitched = librosa.effects.pitch_shift(y_denoised, sr=sr, n_steps=pitch_steps_val)
-                
-                # --- 4. FL Studio वोकल मिक्सर चेन (Pedalboard) ---
-                board = Pedalboard([
-                    HighpassFilter(cutoff_frequency_hz=high_pass_cut),
-                    Compressor(threshold_db=comp_thresh, ratio=comp_ratio, attack_ms=comp_attack, release_ms=comp_release),
-                    Chorus(rate_hz=0.8, depth=0.25, centre_delay_ms=6.0, feedback=0.1, mix=chorus_mix),
-                    Delay(delay_seconds=delay_time, feedback=0.2, mix=delay_mix),
-                    Reverb(room_size=reverb_room, damping=reverb_damping, wet_level=reverb_wet, dry_level=0.7),
-                    Distortion(drive_db=distortion_drive),
-                    LowpassFilter(cutoff_frequency_hz=low_pass_cut),
-                    Gain(gain_db=master_gain)
-                ])
-                
-                # इफ़ेक्ट्स अप्लाई करना
-                effected = board(y_pitched, sr)
-                
-                # आउटफाइल सेव करना
-                base_name = os.path.splitext(uploaded_file.name)[0]
-                output_filename = f"{base_name}_FL_Studio_Pro.wav"
-                output_path = os.path.join(OUTPUT_DIR, output_filename)
-                
-                sf.write(output_path, effected, sr)
-                
-                st.success(f"✨ बधाई हो! FL Studio स्टाइल और आपके कस्टम स्टाइल ('{custom_style}') के साथ प्रो गाना तैयार है!")
-                
-            except Exception as e:
-                st.error(f"प्रोसेसिंग में एरर आया: {e}")
+        # बीट और वोकल का मिक्सअप
+        min_len = min(len(processed_vocal), len(beat_audio))
+        final_mix = processed_vocal[:min_len] + 0.85 * beat_audio[:min_len]
 
-# सॉन्ग लाइब्रेरी और डाउनलोड सेक्शन
-st.markdown("---")
-st.subheader("📂 आपकी सॉन्ग लाइब्रेरी (Generated Songs)")
+        output_path = os.path.join('uploads', 'final_mastered_song.wav')
+        sf.write(output_path, final_mix, sr)
 
-saved_songs = os.listdir(OUTPUT_DIR)
-if saved_songs:
-    for song in sorted(saved_songs, reverse=True):
-        if song.endswith(('.wav', '.mp3')):
-            song_path = os.path.join(OUTPUT_DIR, song)
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.text(song)
-                st.audio(song_path)
-            with col2:
-                with open(song_path, "rb") as file:
-                    st.download_button(
-                        label="⬇️ डाउनलोड",
-                        data=file,
-                        file_name=song,
-                        mime="audio/wav",
-                        key=song
-                    )
-else:
-    st.info("अभी तक कोई गाना नहीं बनाया गया है।")
+        return send_file(output_path, as_attachment=True)
+
+    return render_template_string(HTML_TEMPLATE)
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
