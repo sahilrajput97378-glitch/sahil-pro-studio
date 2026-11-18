@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["libsndfile", "python3"]
+nixPkgs = ["libsndfile", "python3", "gcc"]
