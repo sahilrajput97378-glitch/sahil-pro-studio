@@ -1,121 +1,116 @@
 import os
-from flask import Flask, render_template_string, request, send_file
+import streamlit as st
 import librosa
 import soundfile as sf
 import numpy as np
-from pedalboard import Pedalboard, Reverb, Compressor, HighpassFilter, Gain
+import noisereduce as nr
+from pedalboard import (
+    Pedalboard, Reverb, Compressor, Gain, Chorus, Delay, 
+    HighpassFilter, LowpassFilter, Distortion, Phaser, Limiter
+)
 
-app = Flask(__name__)
+st.set_page_config(page_title="Sahil Pro AI Smart Studio DAW", page_icon="🎧", layout="centered")
 
-HTML_TEMPLATE = '''
-<!doctype html>
-<html lang="hi">
-<head>
-    <meta charset="utf-8">
-    <title>Smart AI Vocal Match Studio</title>
-    <style>
-        body { font-family: Arial, sans-serif; background: #121212; color: #fff; padding: 20px; display: flex; justify-content: center; }
-        .container { width: 100%; max-width: 500px; background: #1e1e1e; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-        h2 { text-align: center; color: #1db954; margin-bottom: 20px; }
-        label { display: block; margin-top: 15px; font-weight: bold; font-size: 14px; }
-        input[type="file"], textarea { width: 100%; margin-top: 5px; padding: 10px; border-radius: 6px; border: 1px solid #444; background: #2a2a2a; color: #fff; box-sizing: border-box; }
-        button { width: 100%; margin-top: 25px; padding: 12px; border-radius: 6px; background: #1db954; color: #fff; font-weight: bold; font-size: 16px; border: none; cursor: pointer; }
-        button:hover { background: #1aa34a; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h2>🎛️ Smart AI Reference Vocal Studio</h2>
-        <form method="POST" enctype="multipart/form-data">
-            <label>1. ओरिजिनल बीट (Beat):</label>
-            <input type="file" name="beat" accept=".wav,.mp3" required>
+OUTPUT_DIR = "generated_songs"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-            <label>2. कच्ची आवाज़ (Dry Vocals):</label>
-            <input type="file" name="vocal" accept=".wav,.mp3" required>
+st.title("🎧 Sahil Creation & DP Studio Pro - AI Smart Reference Matching")
+st.write("AI आपके रेफरेंस गाने को एनालाइज करके, बिना किसी ग्लिच के आपकी आवाज़ पर परफेक्ट इफ़ेक्ट्स अप्लाई करेगा!")
 
-            <label>3. रेफरेंस सॉन्ग (वाइब और इफ़ेक्ट्स मैच करने के लिए):</label>
-            <input type="file" name="reference" accept=".wav,.mp3">
+# --- साइडबार ---
+st.sidebar.header("🎛️ AI Smart Reference Settings")
+custom_style = st.sidebar.text_input("गाना स्टाइल / वाइब", value="Sad Hindi Hip-Hop Melodic Rap")
+reference_audio_file = st.sidebar.file_uploader("अपना रेफरेंस गाना अपलोड करें", type=["mp3", "wav", "m4a"])
 
-            <label>4. कस्टम स्टाइल बॉक्स (अपना मूड या वाइब लिखें):</label>
-            <textarea name="style" rows="3" placeholder="जैसे: Sad Haryanvi vibe, deep reverb, clean vocals..."></textarea>
+# --- मुख्य ऐप इंटरफ़ेस ---
+uploaded_file = st.file_uploader("अपनी सादी आवाज़ अपलोड करें (MP3, WAV, M4A)", type=["mp3", "wav", "m4a"])
 
-            <button type="submit">🚀 स्मार्ट रेफरेंस मिक्सिंग शुरू करें</button>
-        </form>
-    </div>
-</body>
-</html>
-'''
+if uploaded_file is not None:
+    st.audio(uploaded_file, format='audio/mp3')
+    
+    if st.button("🚀 AI स्मार्ट मास्टरिग शुरू करें"):
+        if reference_audio_file is None:
+            st.warning("कृपया AI मैचिंग के लिए साइडबार में एक **रेफरेंस गाना** जरूर अपलोड करें!")
+        else:
+            with st.spinner("ऑडियो प्रोसेस हो रहा है, कृपया इंतज़ार करें..."):
+                try:
+                    # 1. फाइलें सेव करना
+                    user_bytes = uploaded_file.read()
+                    ref_bytes = reference_audio_file.read()
+                    
+                    user_path = "temp_user.wav"
+                    ref_path = "temp_ref.wav"
+                    
+                    with open(user_path, "wb") as f:
+                        f.write(user_bytes)
+                    with open(ref_path, "wb") as f:
+                        f.write(ref_bytes)
+                    
+                    # 2. ऑडियो लोड करना (मोनो और फिक्स सैंपल रेट के साथ ताकि ग्लिच न आए)
+                    y_user, sr = librosa.load(user_path, sr=44100, mono=True)
+                    y_ref, _ = librosa.load(ref_path, sr=44100, mono=True)
+                    
+                    # 3. RMS वॉल्यूम मैचिंग
+                    ref_rms = np.sqrt(np.mean(y_ref**2))
+                    user_rms = np.sqrt(np.mean(y_user**2))
+                    volume_adjustment_db = 20 * np.log10(ref_rms / user_rms) if user_rms > 0 else 0.0
+                    
+                    # 4. AI कैलकुलेशन (सुरक्षित लिमिट के अंदर)
+                    ref_activity = np.mean(np.abs(np.diff(y_ref)))
+                    ai_reverb_mix = float(np.clip(ref_activity * 0.4, 0.10, 0.30))
+                    ai_delay_mix = float(np.clip(ref_activity * 0.25, 0.05, 0.18))
+                    
+                    st.info(f"🤖 AI सेटिंग्स: रिवर्ब = {int(ai_reverb_mix*100)}%, डिले = {int(ai_delay_mix*100)}%, गेन = {round(volume_adjustment_db, 2)} dB")
+                    
+                    # 5. हल्का और सेफ नॉइज़ रिडक्शन (ग्लिच-फ्री)
+                    y_denoised = nr.reduce_noise(y=y_user, sr=sr, stationary=True, prop_decrease=0.6)
+                    
+                    # 6. स्टेबल पैडल बोर्ड (साफ और सुरक्षित चेन)
+                    ai_matched_board = Pedalboard([
+                        HighpassFilter(cutoff_frequency_hz=85.0),
+                        Compressor(threshold_db=-16.0, ratio=3.0),
+                        Delay(delay_seconds=0.25, feedback=0.1, mix=ai_delay_mix),
+                        Reverb(room_size=0.4, damping=0.6, wet_level=ai_reverb_mix, dry_level=0.8),
+                        Limiter(threshold_db=-0.6),
+                        Gain(gain_db=volume_adjustment_db + 1.0)
+                    ])
+                    
+                    # इफ़ेक्ट्स प्रोसेस करना
+                    effected = ai_matched_board(y_denoised, sr)
+                    
+                    # 7. आउटपुट सेव करना
+                    base_name = os.path.splitext(uploaded_file.name)[0]
+                    output_filename = f"{base_name}_Clean_Matched.wav"
+                    output_path = os.path.join(OUTPUT_DIR, output_filename)
+                    
+                    sf.write(output_path, effected, sr)
+                    
+                    st.success("✨ आवाज़ पूरी तरह साफ़ और ग्लिच-फ्री तरीके से तैयार हो गई है!")
+                    
+                except Exception as e:
+                    st.error(f"प्रोसेसिंग में एरर आया: {e}")
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    if request.method == 'POST':
-        beat_file = request.files['beat']
-        vocal_file = request.files['vocal']
-        ref_file = request.files.get('reference')
-        style_text = request.form.get('style', '').lower()
+# सॉन्ग लाइब्रेरी और डाउनलोड सेक्शन
+st.markdown("---")
+st.subheader("📂 आपकी सॉन्ग लाइब्रेरी (Generated Songs)")
 
-        os.makedirs('uploads', exist_ok=True)
-        beat_path = os.path.join('uploads', beat_file.filename)
-        vocal_path = os.path.join('uploads', vocal_file.filename)
-        beat_file.save(beat_path)
-        vocal_file.save(vocal_path)
-
-        # ऑडियो लोड करना
-        vocal_audio, sr = librosa.load(vocal_path, sr=22050)
-        beat_audio, _ = librosa.load(beat_path, sr=22050)
-
-        # डिफॉल्ट इफ़ेक्ट पैरामीटर्स
-        rev_room = 0.3
-        rev_wet = 0.25
-        comp_ratio = 3.0
-
-        # --- स्मार्ट रेफरेंस एनालिसिस लॉजिक ---
-        if ref_file and ref_file.filename != '':
-            ref_path = os.path.join('uploads', ref_file.filename)
-            ref_file.save(ref_path)
-            ref_audio, _ = librosa.load(ref_path, sr=22050)
-            
-            # रेफरेंस गाने की एनर्जी और स्पेक्ट्रल ब्राइटनेस कैलकुलेट करना
-            ref_rms = np.mean(librosa.feature.rms(y=ref_audio))
-            
-            # वाइब के हिसाब से ऑटोमैटिक पैरामीटर सेट करना
-            if ref_rms > 0.1:  # अगर गाना एनर्जेटिक/लाउड है
-                comp_ratio = 4.5
-                rev_wet = 0.20
-            else:  # अगर स्लो/सैड/मेलोडी वाइब है (ज्यादा रिवर्ब चाहिए)
-                rev_room = 0.6
-                rev_wet = 0.45
-                comp_ratio = 2.5
-        
-        # --- कस्टम स्टाइल बॉक्स का असर ---
-        if 'sad' in style_text or 'reverb' in style_text:
-            rev_room = 0.65
-            rev_wet = 0.5
-        if 'clean' in style_text or 'dry' in style_text:
-            rev_wet = 0.15
-
-        # स्मार्ट पैडलबोर्ड जो रेफरेंस और स्टाइल के हिसाब से एडजस्ट होगा
-        board = Pedalboard([
-            HighpassFilter(cutoff_frequency_hz=85.0),
-            Compressor(threshold_db=-20.0, ratio=comp_ratio),
-            Reverb(room_size=rev_room, damping=0.5, wet_level=rev_wet, dry_level=1.0 - rev_wet),
-            Gain(gain_db=2.0)
-        ])
-
-        # वोकल्स पर ऑटोमैटिक प्रोसेसिंग
-        processed_vocal = board(vocal_audio, sr)
-
-        # बीट और वोकल का मिक्सअप
-        min_len = min(len(processed_vocal), len(beat_audio))
-        final_mix = processed_vocal[:min_len] + 0.85 * beat_audio[:min_len]
-
-        output_path = os.path.join('uploads', 'final_mastered_song.wav')
-        sf.write(output_path, final_mix, sr)
-
-        return send_file(output_path, as_attachment=True)
-
-    return render_template_string(HTML_TEMPLATE)
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+saved_songs = os.listdir(OUTPUT_DIR)
+if saved_songs:
+    for song in sorted(saved_songs, reverse=True):
+        if song.endswith(('.wav', '.mp3')):
+            song_path = os.path.join(OUTPUT_DIR, song)
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.text(song)
+                st.audio(song_path)
+            with col2:
+                with open(song_path, "rb") as file:
+                    st.download_button(
+                        label="⬇️ डाउनलोड",
+                        data=file,
+                        file_name=song,
+                        mime="audio/wav",
+                        key=song
+                    )
+else:
+    st.info("अभी तक कोई गाना नहीं बनाया गया है।")
