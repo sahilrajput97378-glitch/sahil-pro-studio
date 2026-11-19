@@ -1,284 +1,363 @@
+import io
 import os
-import streamlit as st
+import tempfile
 import librosa
-import soundfile as sf
 import numpy as np
-import noisereduce as nr
+import soundfile as sf
+import streamlit as st
 from pedalboard import (
-    Pedalboard,
-    Reverb,
     Compressor,
-    Gain,
     Delay,
+    Gain,
     HighpassFilter,
     Limiter,
+    Pedalboard,
+    Reverb,
 )
 
-st.set_page_config(
-    page_title="Sahil Pro AI Smart Studio DAW",
-    page_icon="🎧",
-    layout="centered",
-)
+st.set_page_config(page_title="AI Vocal + Beat Reference Studio", page_icon="🎛️", layout="wide")
+st.title("🎛️ AI Vocal + Beat Reference Studio")
+st.caption("Vocal + Beat + Reference Song: AI रेफरेंस का अंदाज़ा लगाकर मिक्स, रिवर्ब, डिले और वाइब मैच करता है।")
 
-OUTPUT_DIR = "generated_songs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-st.title("🎧 Sahil Creation & DP Studio Pro - AI Smart Reference Matching")
-st.write(
-    "रेफरेंस ऑडियो को एनालाइज़ करके रिवर्ब, डिले, कंप्रेशन और गेन का अंदाज़ा लगाकर "
-    "आपकी आवाज़ पर स्टूडियो इफेक्ट्स अप्लाई करें।"
-)
-
-# --- साइडबार ---
-st.sidebar.header("🎛️ AI Smart Reference Settings")
-custom_style = st.sidebar.text_input(
-    "गाना स्टाइल / वाइब",
-    value="Sad Hindi Hip-Hop Melodic Rap",
-)
-reference_audio_file = st.sidebar.file_uploader(
-    "अपना रेफरेंस ट्रैक / वोकल अपलोड करें",
-    type=["mp3", "wav", "m4a", "ogg"],
-)
-
-auto_match = st.sidebar.checkbox("🤖 AI ऑटो-मैच इफेक्ट्स ऑन रखें", value=True)
-if not auto_match:
-    manual_reverb_pct = st.sidebar.slider("रिवर्ब (%)", 0, 80, 35)
-    manual_delay_pct = st.sidebar.slider("डिले (%)", 0, 50, 20)
-    manual_gain_db = st.sidebar.slider("एक्स्ट्रा गेन (dB)", -6.0, 18.0, 4.0, step=0.5)
-
-# --- मुख्य ऐप इंटरफ़ेस ---
-uploaded_file = st.file_uploader(
-    "अपनी सादी आवाज़ अपलोड करें (MP3, WAV, M4A, OGG)",
-    type=["mp3", "wav", "m4a", "ogg"],
-)
+OUT_DIR = "generated_songs"
+os.makedirs(OUT_DIR, exist_ok=True)
 
 
-def safe_rms(y: np.ndarray) -> float:
-    if y is None or y.size == 0:
-        return 0.0
-    val = float(np.sqrt(np.mean(np.square(y, dtype=np.float64))))
-    return val if np.isfinite(val) else 0.0
+def sanitize_audio(y: np.ndarray) -> np.ndarray:
+    y = np.asarray(y, dtype=np.float32)
+    return np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def analyze_reference_effects(y_ref: np.ndarray, sr: int) -> dict:
-    """
-    रेफरेंस ऑडियो से RMS लाउडनेस, ट्रांजिएंट/एक्टिविटी और
-    टेल-डिके (reverb/echo sustain) का अनुमान निकालता है।
-    """
-    ref_rms = safe_rms(y_ref)
-    if ref_rms <= 1e-7 or y_ref.size < sr // 2:
-        return {
-            "ref_rms": ref_rms,
-            "reverb_mix": 0.35,
-            "delay_mix": 0.20,
-            "room_size": 0.60,
-            "delay_sec": 0.28,
-            "comp_ratio": 3.5,
-        }
+def load_audio_file(uploaded_file, sr: int = 44100) -> np.ndarray:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        tmp_path = tmp.name
+    try:
+        y, _ = librosa.load(tmp_path, sr=sr, mono=True)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    return sanitize_audio(y)
 
-    # फ्रेम-वाइज़ एनर्जी निकालना
-    frame_len = max(256, int(0.05 * sr))
-    hop_len = max(128, int(0.025 * sr))
-    rms_frames = librosa.feature.rms(
-        y=y_ref, frame_length=frame_len, hop_length=hop_len
-    )[0]
-    rms_frames = np.nan_to_num(rms_frames, nan=0.0, posinf=0.0, neginf=0.0)
 
-    peak_rms = float(np.max(rms_frames)) if rms_frames.size > 0 else ref_rms
-    mean_rms = float(np.mean(rms_frames)) if rms_frames.size > 0 else ref_rms
+def rms_db(y: np.ndarray) -> float:
+    y = sanitize_audio(y)
+    if len(y) == 0:
+        return -60.0
+    rms = float(np.sqrt(np.mean(np.square(y))))
+    if rms < 1e-7:
+        return -60.0
+    return float(20.0 * np.log10(rms))
 
-    # अगर आवाज़/सिग्नल में सूखने (decay) के बाद भी एनर्जी बनी रहती है,
-    # तो रिवर्ब/टेल ज़्यादा होने का संकेत मिलता है
-    sustain_ratio = float(np.clip(mean_rms / max(peak_rms, 1e-7), 0.0, 1.0))
 
-    # कम एनर्जी वाले हिस्सों की तुलना में टेल-सस्टेन का अनुमान
-    quiet_threshold = np.percentile(rms_frames, 35) if rms_frames.size > 0 else 0.0
-    active_threshold = np.percentile(rms_frames, 75) if rms_frames.size > 0 else 0.0
-    tail_ratio = float(
-        np.clip(quiet_threshold / max(active_threshold, 1e-7), 0.0, 1.0)
-    )
+def analyze_reference_song(ref: np.ndarray, sr: int) -> dict:
+    """Reference song ki vibe, tail/reverb, echo/delay aur dynamics ka safe andaaza."""
+    ref = sanitize_audio(ref)
+    defaults = {
+        "reverb_wet": 0.18,
+        "reverb_room": 0.42,
+        "delay_mix": 0.06,
+        "delay_feedback": 0.08,
+        "comp_thresh": -18.0,
+        "comp_ratio": 2.8,
+        "beat_gain_db": -4.0,
+        "duck_db": 1.8,
+        "master_target_db": -12.0,
+    }
+    if len(ref) < sr:
+        return defaults
 
-    # स्पेक्ट्रल फ्लक्स / ट्रांजिएंट एक्टिविटी (डिले और डायनामिक्स के लिए)
-    onset_env = librosa.onset.onset_strength(y=y_ref, sr=sr, hop_length=hop_len)
-    onset_env = np.nan_to_num(onset_env, nan=0.0, posinf=0.0, neginf=0.0)
-    onset_norm = float(
-        np.clip(np.mean(onset_env) / max(np.max(onset_env), 1e-6), 0.0, 1.0)
-    )
+    # 1. Dynamics / Crest factor -> Compression & Vibe
+    rms_frames = librosa.feature.rms(y=ref, frame_length=2048, hop_length=512)[0]
+    active_rms = rms_frames[rms_frames > np.max(rms_frames) * 0.15] if len(rms_frames) > 0 else np.array([0.05])
+    mean_rms = float(np.mean(active_rms)) if len(active_rms) > 0 else 0.05
+    peak = float(np.max(np.abs(ref))) + 1e-7
+    crest_db = float(20.0 * np.log10(peak / max(mean_rms, 1e-6)))
 
-    reverb_score = 0.55 * sustain_ratio + 0.45 * tail_ratio
-    reverb_mix = float(np.clip(0.18 + reverb_score * 0.45, 0.18, 0.60))
-    room_size = float(np.clip(0.35 + reverb_score * 0.55, 0.35, 0.88))
+    # Tighter/punchier modern reference -> slightly higher ratio
+    comp_ratio = float(np.clip(2.0 + (18.0 - crest_db) * 0.14, 1.8, 4.5))
+    comp_thresh = float(np.clip(-22.0 + (14.0 - crest_db) * 0.4, -26.0, -13.0))
 
-    # स्पष्ट ट्रांजिएंट/बीट्स होने पर डिले हल्का और कंट्रोल्ड रखते हैं
-    delay_mix = float(np.clip(0.12 + (1.0 - onset_norm) * 0.22, 0.12, 0.32))
-    delay_sec = float(np.clip(0.22 + (1.0 - sustain_ratio) * 0.16, 0.20, 0.38))
+    # 2. Reverb estimation from energy decay in low-energy frames
+    low_mask = rms_frames < np.percentile(rms_frames, 35)
+    low_energy = float(np.mean(rms_frames[low_mask])) if np.any(low_mask) else 0.0
+    tail_ratio = float(np.clip(low_energy / max(mean_rms, 1e-6), 0.0, 1.0))
+    reverb_wet = float(np.clip(0.10 + tail_ratio * 0.45, 0.08, 0.36))
+    reverb_room = float(np.clip(0.30 + tail_ratio * 0.75, 0.25, 0.72))
 
-    # डायनामिक रेंज के हिसाब से कंप्रेशन रेशियो
-    max_abs = float(np.max(np.abs(y_ref)))
-    crest_factor = max_abs / max(ref_rms, 1e-7)
-    comp_ratio = float(np.clip(2.5 + (crest_factor - 4.0) * 0.35, 2.5, 5.5))
+    # 3. Safe Delay estimation (kept low-bounce so it never turns into glitchy echo)
+    onset_env = librosa.onset.onset_strength(y=ref, sr=sr)
+    if len(onset_env) > 64:
+        autocorr = librosa.autocorrelate(onset_env, max_size=min(len(onset_env) - 1, 120))
+        # Look around ~0.12s - 0.35s lag (approx 5 to 15 frames at hop=512, sr=44100)
+        window = autocorr[5:16]
+        if len(window) > 0 and np.max(autocorr) > 0:
+            echo_score = float(np.clip(np.max(window) / (np.max(autocorr) + 1e-6), 0.0, 1.0))
+        else:
+            echo_score = 0.0
+    else:
+        echo_score = 0.0
+
+    delay_mix = float(np.clip(0.03 + echo_score * 0.10, 0.02, 0.14))
+    delay_feedback = float(np.clip(0.05 + echo_score * 0.10, 0.04, 0.16))
+
+    # 4. Master loudness target (safe, non-clipping)
+    ref_db = rms_db(ref)
+    master_target_db = float(np.clip(ref_db, -18.0, -9.0))
 
     return {
-        "ref_rms": ref_rms,
-        "reverb_mix": reverb_mix,
-        "delay_mix": delay_mix,
-        "room_size": room_size,
-        "delay_sec": delay_sec,
-        "comp_ratio": comp_ratio,
+        "reverb_wet": round(reverb_wet, 2),
+        "reverb_room": round(reverb_room, 2),
+        "delay_mix": round(delay_mix, 2),
+        "delay_feedback": round(delay_feedback, 2),
+        "comp_thresh": round(comp_thresh, 1),
+        "comp_ratio": round(comp_ratio, 1),
+        "beat_gain_db": -4.0,
+        "duck_db": 1.8,
+        "master_target_db": round(master_target_db, 1),
     }
 
 
-if uploaded_file is not None:
-    st.audio(uploaded_file)
+def match_length_and_sr(vocal: np.ndarray, beat: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray]:
+    vocal = sanitize_audio(vocal)
+    beat = sanitize_audio(beat)
+    target_len = max(len(vocal), len(beat))
+    if target_len == 0:
+        return np.zeros(sr, dtype=np.float32), np.zeros(sr, dtype=np.float32)
 
-    if st.button("🚀 AI स्मार्ट मास्टरिग शुरू करें"):
-        if reference_audio_file is None:
-            st.warning("कृपया साइडबार में एक **रेफरेंस ट्रैक** जरूर अपलोड करें।")
-        else:
-            with st.spinner("ऑडियो एनालाइज़ और प्रोसेस हो रहा है, कृपया इंतज़ार करें..."):
-                user_path = os.path.join(OUTPUT_DIR, "_temp_user_input.wav")
-                ref_path = os.path.join(OUTPUT_DIR, "_temp_ref_input.wav")
+    vocal = np.pad(vocal, (0, max(0, target_len - len(vocal))), mode="constant")[:target_len]
+    beat = np.pad(beat, (0, max(0, target_len - len(beat))), mode="constant")[:target_len]
+    return vocal, beat
 
-                try:
-                    with open(user_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    with open(ref_path, "wb") as f:
-                        f.write(reference_audio_file.getbuffer())
 
-                    sr = 44100
-                    y_user, _ = librosa.load(user_path, sr=sr, mono=True)
-                    y_ref, _ = librosa.load(ref_path, sr=sr, mono=True)
+def process_vocal(
+    vocal: np.ndarray,
+    sr: int,
+    hp_freq: float,
+    comp_thresh: float,
+    comp_ratio: float,
+    delay_mix: float,
+    delay_feedback: float,
+    reverb_wet: float,
+    reverb_room: float,
+    vocal_gain_db: float,
+) -> np.ndarray:
+    vocal = sanitize_audio(vocal)
+    if len(vocal) == 0 or np.max(np.abs(vocal)) < 1e-6:
+        return vocal
 
-                    if y_user is None or y_user.size == 0:
-                        st.error("अपलोड की गई आवाज़ वाली फाइल खाली या खराब लग रही है।")
-                        st.stop()
+    try:
+        import noisereduce as nr
+        vocal = nr.reduce_noise(y=vocal, sr=sr, prop_decrease=0.45, stationary=True)
+        vocal = sanitize_audio(vocal)
+    except Exception:
+        pass
 
-                    if y_ref is None or y_ref.size == 0:
-                        st.error("रेफरेंस फाइल खाली या खराब लग रही है।")
-                        st.stop()
+    board = Pedalboard([
+        HighpassFilter(cutoff_frequency_hz=hp_freq),
+        Compressor(threshold_db=comp_thresh, ratio=comp_ratio, attack_ms=8.0, release_ms=120.0),
+        Delay(delay_seconds=0.18, feedback=delay_feedback, mix=delay_mix),
+        Reverb(room_size=reverb_room, damping=0.55, wet_level=reverb_wet, dry_level=0.85, width=0.8),
+        Gain(gain_db=vocal_gain_db),
+        Limiter(threshold_db=-1.0, release_ms=100.0),
+    ])
+    return sanitize_audio(board(vocal, sr))
 
-                    # 1. हल्की नॉइज़ क्लीनअप (वोकल को ज़्यादा पतला किए बिना)
-                    try:
-                        y_clean = nr.reduce_noise(
-                            y=y_user,
-                            sr=sr,
-                            stationary=True,
-                            prop_decrease=0.55,
-                        )
-                    except Exception:
-                        y_clean = y_user
 
-                    y_clean = np.nan_to_num(
-                        y_clean, nan=0.0, posinf=0.0, neginf=0.0
-                    ).astype(np.float32)
+def apply_gentle_ducking(vocal: np.ndarray, beat: np.ndarray, sr: int, duck_db: float) -> np.ndarray:
+    vocal, beat = match_length_and_sr(vocal, beat, sr)
+    if len(vocal) == 0 or duck_db <= 0.0:
+        return beat
 
-                    # 2. रेफरेंस एनालिसिस और गेन मैचिंग
-                    ref_stats = analyze_reference_effects(y_ref, sr)
-                    user_rms = safe_rms(y_clean)
-                    ref_rms = ref_stats["ref_rms"]
+    frame_len = max(256, int(0.03 * sr))
+    hop_len = max(128, int(0.015 * sr))
+    rms = librosa.feature.rms(y=vocal, frame_length=frame_len, hop_length=hop_len)[0]
+    if len(rms) == 0:
+        return beat
 
-                    if user_rms > 1e-6 and ref_rms > 1e-6:
-                        raw_db = 20.0 * np.log10(ref_rms / user_rms)
-                    else:
-                        raw_db = 4.0
+    peak_rms = max(float(np.max(rms)), 1e-5)
+    norm_env = np.clip(rms / peak_rms, 0.0, 1.0)
+    active_mask = np.clip((norm_env - 0.12) / 0.65, 0.0, 1.0)
 
-                    if auto_match:
-                        reverb_mix = ref_stats["reverb_mix"]
-                        delay_mix = ref_stats["delay_mix"]
-                        gain_db = float(np.clip(raw_db + 2.0, -4.0, 18.0))
-                    else:
-                        reverb_mix = float(manual_reverb_pct) / 100.0
-                        delay_mix = float(manual_delay_pct) / 100.0
-                        gain_db = float(np.clip(raw_db + manual_gain_db, -6.0, 20.0))
+    gain_db_curve = -duck_db * active_mask
+    gain_lin_curve = librosa.db_to_amplitude(gain_db_curve)
 
-                    st.info(
-                        f"🤖 AI एनालिसिस: रिवर्ब ≈ {int(round(reverb_mix * 100))}%, "
-                        f"डिले ≈ {int(round(delay_mix * 100))}%, "
-                        f"गेन = {round(gain_db, 2)} dB, "
-                        f"कंप्रेशन = {round(ref_stats['comp_ratio'], 1)}:1"
-                    )
+    times = librosa.frames_to_time(np.arange(len(gain_lin_curve)), sr=sr, hop_length=hop_len)
+    sample_times = np.arange(len(beat)) / float(sr)
+    beat_gain = np.interp(sample_times, times, gain_lin_curve, left=1.0, right=1.0).astype(np.float32)
 
-                    # 3. स्टूडियो प्रोसेसिंग चेन
-                    board = Pedalboard([
-                        HighpassFilter(cutoff_frequency_hz=85.0),
-                        Compressor(
-                            threshold_db=-20.0,
-                            ratio=ref_stats["comp_ratio"],
-                            attack_ms=6.0,
-                            release_ms=110.0,
-                        ),
-                        Delay(
-                            delay_seconds=ref_stats["delay_sec"],
-                            feedback=0.20,
-                            mix=delay_mix,
-                        ),
-                        Reverb(
-                            room_size=ref_stats["room_size"],
-                            damping=0.45,
-                            wet_level=reverb_mix,
-                            dry_level=0.78,
-                        ),
-                        Gain(gain_db=gain_db),
-                        Limiter(threshold_db=-0.5),
-                    ])
+    return sanitize_audio(beat * beat_gain)
 
-                    effected = board(y_clean, sr)
-                    effected = np.nan_to_num(
-                        effected, nan=0.0, posinf=0.0, neginf=0.0
-                    )
-                    effected = np.clip(effected, -1.0, 1.0).astype(np.float32)
 
-                    # 4. सुरक्षित फाइल सेव करना
-                    safe_base = "".join(
-                        c if c.isalnum() or c in (" ", "-", "_") else "_"
-                        for c in os.path.splitext(uploaded_file.name)[0]
-                    ).strip() or "vocal_track"
+def mix_and_master(
+    vocal: np.ndarray,
+    beat: np.ndarray,
+    sr: int,
+    beat_gain_db: float,
+    vocal_offset_sec: float,
+    duck_db: float,
+    master_target_db: float,
+) -> np.ndarray:
+    vocal = sanitize_audio(vocal)
+    beat = sanitize_audio(beat)
 
-                    output_filename = f"{safe_base}_Studio_Mix.wav"
-                    output_path = os.path.join(OUTPUT_DIR, output_filename)
+    shift_samples = int(round(vocal_offset_sec * sr))
+    if shift_samples > 0:
+        vocal = np.concatenate([np.zeros(shift_samples, dtype=np.float32), vocal])
+    elif shift_samples < 0:
+        vocal = vocal[min(abs(shift_samples), len(vocal)):]
 
-                    sf.write(output_path, effected, sr, subtype="PCM_16")
-                    st.success("✨ प्रोसेसिंग पूरी हो गई! नीचे लाइब्रेरी में सुनकर देख।")
+    vocal, beat = match_length_and_sr(vocal, beat, sr)
+    beat_adj = beat * float(librosa.db_to_amplitude(beat_gain_db))
+    beat_ducked = apply_gentle_ducking(vocal, beat_adj, sr, duck_db=duck_db)
+    combined = sanitize_audio(vocal + beat_ducked)
 
-                except Exception as e:
-                    st.error(f"प्रोसेसिंग में दिक्कत आई: {e}")
+    current_db = rms_db(combined)
+    if current_db > -55.0:
+        level_shift_db = float(np.clip(master_target_db - current_db, -8.0, 8.0))
+        combined = sanitize_audio(combined * float(librosa.db_to_amplitude(level_shift_db)))
 
-                finally:
-                    for temp_file in (user_path, ref_path):
-                        if os.path.exists(temp_file):
-                            try:
-                                os.remove(temp_file)
-                            except OSError:
-                                pass
+    master_board = Pedalboard([
+        Compressor(threshold_db=-10.0, ratio=2.2, attack_ms=15.0, release_ms=180.0),
+        Limiter(threshold_db=-0.6, release_ms=120.0),
+    ])
+    return sanitize_audio(master_board(combined, sr))
 
-# --- सॉन्ग लाइब्रेरी और डाउनलोड सेक्शन ---
-st.markdown("---")
-st.subheader("📂 आपकी सॉन्ग लाइब्रेरी (Generated Songs)")
 
-if os.path.exists(OUTPUT_DIR):
-    saved_songs = [
-        f
-        for f in os.listdir(OUTPUT_DIR)
-        if not f.startswith("_temp_") and f.endswith((".wav", ".mp3"))
-    ]
-else:
-    saved_songs = []
+# Session state for AI Reference Brain
+if "ai_params" not in st.session_state:
+    st.session_state.ai_params = {
+        "reverb_wet": 0.18,
+        "reverb_room": 0.42,
+        "delay_mix": 0.06,
+        "delay_feedback": 0.08,
+        "comp_thresh": -18.0,
+        "comp_ratio": 2.8,
+        "beat_gain_db": -4.0,
+        "duck_db": 1.8,
+        "master_target_db": -12.0,
+    }
 
-if saved_songs:
-    for song in sorted(saved_songs, reverse=True):
-        song_path = os.path.join(OUTPUT_DIR, song)
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.text(song)
-            st.audio(song_path)
-        with col2:
-            with open(song_path, "rb") as file:
-                st.download_button(
-                    label="⬇️ डाउनलोड",
-                    data=file.read(),
-                    file_name=song,
-                    mime="audio/wav",
-                    key=f"dl_{song}",
+col1, col2, col3 = st.columns(3)
+with col1:
+    vocal_file = st.file_uploader("🎤 Apni Vocal Track", type=["wav", "mp3", "ogg", "m4a"])
+with col2:
+    beat_file = st.file_uploader("🥁 Beat / Instrumental Track", type=["wav", "mp3", "ogg", "m4a"])
+with col3:
+    ref_file = st.file_uploader("🎧 Reference Song (Vibe & Mix Match)", type=["wav", "mp3", "ogg", "m4a"])
+
+ai_btn_col, info_col = st.columns([1, 2])
+with ai_btn_col:
+    run_ai_brain = st.button("🧠 AI Dimag: Reference Analyze Karo", use_container_width=True)
+
+if run_ai_brain:
+    if ref_file is None:
+        st.warning("Pehle Reference Song upload karo, phir AI Dimag usko analyze karega.")
+    else:
+        with st.spinner("AI Reference Song ki vibe, reverb, delay aur mastering level samajh raha hai..."):
+            ref_audio = load_audio_file(ref_file, sr=44100)
+            if len(ref_audio) == 0:
+                st.error("Reference file khaali lag rahi hai.")
+            else:
+                st.session_state.ai_params = analyze_reference_song(ref_audio, sr=44100)
+                st.success("AI ne reference song analyze kar liya aur settings set kar di hain!")
+
+p = st.session_state.ai_params
+
+with st.sidebar:
+    st.header("🎚️ Vocal & Mix Controls")
+    hp_freq = st.slider("Highpass Filter (Hz)", 50.0, 200.0, 95.0, 5.0)
+    comp_thresh = st.slider("Vocal Compressor Threshold (dB)", -35.0, -5.0, float(p["comp_thresh"]), 0.5)
+    comp_ratio = st.slider("Vocal Compressor Ratio", 1.5, 6.0, float(p["comp_ratio"]), 0.1)
+    vocal_gain_db = st.slider("Vocal Level (dB)", -12.0, 12.0, 2.0, 0.5)
+
+    st.divider()
+    st.subheader("Reverb & Delay (AI Matched)")
+    reverb_wet = st.slider("Reverb Wet", 0.0, 0.5, float(p["reverb_wet"]), 0.01)
+    reverb_room = st.slider("Reverb Room Size", 0.1, 0.9, float(p["reverb_room"]), 0.02)
+    delay_mix = st.slider("Delay Mix", 0.0, 0.3, float(p["delay_mix"]), 0.01)
+    delay_feedback = st.slider("Delay Feedback", 0.0, 0.35, float(p["delay_feedback"]), 0.01)
+
+    st.divider()
+    st.subheader("Beat & Mastering")
+    beat_gain_db = st.slider("Beat Volume (dB)", -18.0, 6.0, float(p["beat_gain_db"]), 0.5)
+    duck_db = st.slider("Auto Beat Ducking (dB)", 0.0, 5.0, float(p["duck_db"]), 0.2)
+    master_target_db = st.slider("Master Loudness Target (dB)", -20.0, -7.0, float(p["master_target_db"]), 0.5)
+    vocal_offset_sec = st.slider("Vocal Timing Shift (sec)", -2.0, 2.0, 0.0, 0.05)
+
+with info_col:
+    st.info(
+        f"AI Preset — Reverb: {reverb_wet:.2f} | Delay: {delay_mix:.2f} | "
+        f"Comp: {comp_ratio:.1f}:1 ({comp_thresh:.1f} dB) | Master: {master_target_db:.1f} dB"
+    )
+
+track_name = st.text_input("Output Song Name", value="AI_Reference_Mix")
+
+if st.button("✨ Reference Ke Hisaab Se Mix & Master Karo", type="primary", use_container_width=True):
+    if vocal_file is None or beat_file is None:
+        st.warning("Pehle apni Vocal aur Beat dono files upload karo.")
+    else:
+        with st.spinner("Vocal aur Beat ko reference vibe ke hisaab se mix aur master kiya ja raha hai..."):
+            sr = 44100
+            # Agar reference upload hai aur user ne alag se AI button nahi dabaya toh bhi ek baar auto-analyze kar lo
+            if ref_file is not None and not run_ai_brain:
+                ref_audio = load_audio_file(ref_file, sr=sr)
+                if len(ref_audio) > 0:
+                    auto_p = analyze_reference_song(ref_audio, sr=sr)
+                    reverb_wet = auto_p["reverb_wet"]
+                    reverb_room = auto_p["reverb_room"]
+                    delay_mix = auto_p["delay_mix"]
+                    delay_feedback = auto_p["delay_feedback"]
+                    comp_thresh = auto_p["comp_thresh"]
+                    comp_ratio = auto_p["comp_ratio"]
+                    master_target_db = auto_p["master_target_db"]
+
+            vocal_raw = load_audio_file(vocal_file, sr=sr)
+            beat_raw = load_audio_file(beat_file, sr=sr)
+
+            if len(vocal_raw) == 0 or len(beat_raw) == 0:
+                st.error("Vocal ya Beat file khaali hai.")
+            else:
+                vocal_clean = process_vocal(
+                    vocal_raw,
+                    sr=sr,
+                    hp_freq=hp_freq,
+                    comp_thresh=comp_thresh,
+                    comp_ratio=comp_ratio,
+                    delay_mix=delay_mix,
+                    delay_feedback=delay_feedback,
+                    reverb_wet=reverb_wet,
+                    reverb_room=reverb_room,
+                    vocal_gain_db=vocal_gain_db,
                 )
-else:
-    st.info("अभी तक कोई गाना नहीं बनाया गया है।")
+
+                final_mix = mix_and_master(
+                    vocal=vocal_clean,
+                    beat=beat_raw,
+                    sr=sr,
+                    beat_gain_db=beat_gain_db,
+                    vocal_offset_sec=vocal_offset_sec,
+                    duck_db=duck_db,
+                    master_target_db=master_target_db,
+                )
+
+                if np.max(np.abs(final_mix)) < 1e-6:
+                    st.error("Output audio silent aaya—input levels check karo.")
+                else:
+                    safe_name = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in track_name.strip()) or "Mix"
+                    out_path = os.path.join(OUT_DIR, f"{safe_name}_Master.wav")
+                    sf.write(out_path, final_mix, sr)
+
+                    buf = io.BytesIO()
+                    sf.write(buf, final_mix, sr, format="WAV")
+                    buf.seek(0)
+
+                    st.success("Gaana mix aur master hokar taiyaar hai!")
+                    st.audio(buf.getvalue(), format="audio/wav")
+                    st.download_button(
+                        label="⬇️ Download Final Song (WAV)",
+                        data=buf.getvalue(),
+                        file_name=f"{safe_name}_Master.wav",
+                        mime="audio/wav",
+                        use_container_width=True,
+                    )
