@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.env
+generated_songs/
+*.wav
+*.mp3
+*.ogg
+*.m4a
+.streamlit/secrets.toml
